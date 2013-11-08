@@ -1,0 +1,43 @@
+***************
+*** 130,135 ****
+                      STATS_LOCK();
+                      stats.evictions++;
+                      STATS_UNLOCK();
+                  }
+                  do_item_unlink(search);
+                  break;
+--- 130,138 ----
+                      STATS_LOCK();
+                      stats.evictions++;
+                      STATS_UNLOCK();
++ #ifdef USE_REPLICATION
++                     replication_call_del(ITEM_key(search), search->nkey);
++ #endif /* USE_REPLICATION */
+                  }
+                  do_item_unlink(search);
+                  break;
+***************
+*** 263,270 ****
+      stats.total_items += 1;
+      STATS_UNLOCK();
+  
+      /* Allocate a new CAS ID on link. */
+      it->cas_id = get_cas_id();
+  
+      item_link_q(it);
+  
+--- 266,279 ----
+      stats.total_items += 1;
+      STATS_UNLOCK();
+  
++ #ifdef USE_REPLICATION
++     /* Allocate a new CAS ID on link. */
++     if(!(it->it_flags & ITEM_REPDATA))
++         it->cas_id = get_cas_id();
++ #else
+      /* Allocate a new CAS ID on link. */
+      it->cas_id = get_cas_id();
++ #endif /* USE_REPLICATION */
+  
+      item_link_q(it);
+  

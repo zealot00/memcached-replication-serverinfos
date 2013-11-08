@@ -1,0 +1,15 @@
+***************
+*** 20,23 ****
+  eval {
+      my $server = new_memcached("-l 127.0.0.1");
+  };
+- is($@,'', "-l 127.0.0.1 works");
+--- 20,27 ----
+  eval {
+      my $server = new_memcached("-l 127.0.0.1");
+  };
++ if (! support_replication()) {
++     is($@,'', "-l 127.0.0.1 works");
++ } else {
++     ok($@, "-l 127.0.0.1 already in use");
++ }

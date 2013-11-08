@@ -1,0 +1,12 @@
+Master setup:
+
+1). Run ./install_master.sh
+2). Input server's info
+3). Setuped ! good luck!
+
+
+Slave setup:
+
+1). Run ./install_slave.sh
+2). Input server's info
+3). Setuped ! good luck!

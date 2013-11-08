@@ -1,0 +1,81 @@
+***************
+*** 101,106 ****
+      int reqs_per_event;     /* Maximum number of io to process on each
+                                 io-event. */
+      int backlog;
+  };
+  
+  extern struct stats stats;
+--- 101,112 ----
+      int reqs_per_event;     /* Maximum number of io to process on each
+                                 io-event. */
+      int backlog;
++ #ifdef USE_REPLICATION
++     struct in_addr rep_addr;    /* replication connect addr */
++     int rep_listen_port;        /* replication listen  port */
++     int rep_connect_port;       /* replication connect port */
++     int rep_qmax;               /* replication QITEM max */
++ #endif /*USE_REPLICATION*/
+  };
+  
+  extern struct stats stats;
+***************
+*** 112,117 ****
+  /* temp */
+  #define ITEM_SLABBED 4
+  
+  typedef struct _stritem {
+      struct _stritem *next;
+      struct _stritem *prev;
+--- 118,127 ----
+  /* temp */
+  #define ITEM_SLABBED 4
+  
++ #ifdef USE_REPLICATION
++ #define ITEM_REPDATA 128
++ #endif /*USE_REPLICATION*/
++ 
+  typedef struct _stritem {
+      struct _stritem *next;
+      struct _stritem *prev;
+***************
+*** 146,151 ****
+      conn_swallow,    /** swallowing unnecessary bytes w/o storing */
+      conn_closing,    /** closing this connection */
+      conn_mwrite,     /** writing out many items sequentially */
+  };
+  
+  #define NREAD_ADD 1
+--- 156,168 ----
+      conn_swallow,    /** swallowing unnecessary bytes w/o storing */
+      conn_closing,    /** closing this connection */
+      conn_mwrite,     /** writing out many items sequentially */
++ #ifdef USE_REPLICATION
++     conn_repconnect, /* replication */
++     conn_rep_listen, /* */
++     conn_rep_send,   /* */
++     conn_pipe_recv,  /* */
++     conn_pipe_send,  /* */
++ #endif /* USE_REPLICATION */
+  };
+  
+  #define NREAD_ADD 1
+***************
+*** 252,257 ****
+  #include "items.h"
+  #include "memcached_dtrace.h"
+  
+  /*
+   * In multithreaded mode, we wrap certain functions with lock management and
+   * replace the logic of some other functions. All wrapped functions have
+--- 269,278 ----
+  #include "items.h"
+  #include "memcached_dtrace.h"
+  
++ #ifdef USE_REPLICATION
++ #include "replication.h"
++ #endif /* USE_REPLICATION */
++ 
+  /*
+   * In multithreaded mode, we wrap certain functions with lock management and
+   * replace the logic of some other functions. All wrapped functions have

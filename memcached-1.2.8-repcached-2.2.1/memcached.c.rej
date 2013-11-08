@@ -1,0 +1,1328 @@
+***************
+*** 95,100 ****
+  
+  static void conn_free(conn *c);
+  
+  /** exported globals **/
+  struct stats stats;
+  struct settings settings;
+--- 95,123 ----
+  
+  static void conn_free(conn *c);
+  
++ #ifdef USE_REPLICATION
++ static int   rep_exit = 0;
++ static conn *rep_recv = NULL;
++ static conn *rep_send = NULL;
++ static conn *rep_conn = NULL;
++ static conn *rep_serv = NULL;
++ static int  server_socket_replication(const int);
++ static void server_close_replication();
++ static int  replication_init();
++ static int  replication_server_init();
++ static int  replication_client_init();
++ static int  replication_start();
++ static int  replication_connect();
++ static int  replication_close();
++ static int  replication_marugoto(int);
++ static int  replication_send(conn *);
++ static int  replication_pop();
++ static int  replication_push();
++ static int  replication_exit();
++ static int  replication_item(Q_ITEM *);
++ int replication(enum CMD_TYPE type, R_CMD *cmd);
++ #endif /* USE_REPLICATION */
++ 
+  /** exported globals **/
+  struct stats stats;
+  struct settings settings;
+***************
+*** 186,191 ****
+      settings.detail_enabled = 0;
+      settings.reqs_per_event = 20;
+      settings.backlog = 1024;
+  }
+  
+  /* returns true if a deleted item's delete-locked-time is over, and it
+--- 209,220 ----
+      settings.detail_enabled = 0;
+      settings.reqs_per_event = 20;
+      settings.backlog = 1024;
++ #ifdef USE_REPLICATION
++     settings.rep_addr.s_addr = htonl(INADDR_ANY);
++     settings.rep_listen_port = 11212;
++     settings.rep_connect_port = 11212;
++     settings.rep_qmax = 8192;
++ #endif /* USE_REPLICATION */
+  }
+  
+  /* returns true if a deleted item's delete-locked-time is over, and it
+***************
+*** 344,349 ****
+              fprintf(stderr, "<%d server listening\n", sfd);
+          else if (is_udp)
+              fprintf(stderr, "<%d server listening (udp)\n", sfd);
+          else
+              fprintf(stderr, "<%d new client connection\n", sfd);
+      }
+--- 373,382 ----
+              fprintf(stderr, "<%d server listening\n", sfd);
+          else if (is_udp)
+              fprintf(stderr, "<%d server listening (udp)\n", sfd);
++ #ifdef USE_REPLICATION
++         else if (init_state == conn_rep_listen)
++             fprintf(stderr, "<%d server listening (replication)\n", sfd);
++ #endif /* USE_REPLICATION */
+          else
+              fprintf(stderr, "<%d new client connection\n", sfd);
+      }
+***************
+*** 466,472 ****
+      STATS_LOCK();
+      stats.curr_conns--;
+      STATS_UNLOCK();
+- 
+      return;
+  }
+  
+--- 499,504 ----
+      STATS_LOCK();
+      stats.curr_conns--;
+      STATS_UNLOCK();
+      return;
+  }
+  
+***************
+*** 740,745 ****
+  
+      assert(c != NULL);
+  
+      if (c->noreply) {
+          if (settings.verbose > 1)
+              fprintf(stderr, ">%d NOREPLY %s\n", c->sfd, str);
+--- 772,785 ----
+  
+      assert(c != NULL);
+  
++ #ifdef USE_REPLICATION
++     if (c == rep_conn){
++         if (settings.verbose > 1)
++             fprintf(stderr, "REP>%d %s\n", c->sfd, str);
++         conn_set_state(c, conn_read);
++         return;
++     }
++ #endif /* USE_REPLICATION */
+      if (c->noreply) {
+          if (settings.verbose > 1)
+              fprintf(stderr, ">%d NOREPLY %s\n", c->sfd, str);
+***************
+*** 789,795 ****
+      } else {
+        ret = store_item(it, comm);
+        if (ret == 1) {
+            out_string(c, "STORED");
+  #ifdef HAVE_DTRACE
+            switch (comm) {
+            case NREAD_ADD:
+--- 829,844 ----
+      } else {
+        ret = store_item(it, comm);
+        if (ret == 1) {
++ #ifdef USE_REPLICATION
++       {
++           if( c != rep_conn ){
++             replication_call_rep(ITEM_key(it), it->nkey);
++           }
++           out_string(c, "STORED");
++       }
++ #else
+            out_string(c, "STORED");
++ #endif /* USE_REPLICATION */
+  #ifdef HAVE_DTRACE
+            switch (comm) {
+            case NREAD_ADD:
+***************
+*** 1099,1104 ****
+          pos += sprintf(pos, "STAT threads %u\r\n", settings.num_threads);
+          pos += sprintf(pos, "STAT accepting_conns %u\r\n", stats.accepting_conns);
+          pos += sprintf(pos, "STAT listen_disabled_num %llu\r\n", stats.listen_disabled_num);
+          pos += sprintf(pos, "END");
+          STATS_UNLOCK();
+          out_string(c, temp);
+--- 1148,1160 ----
+          pos += sprintf(pos, "STAT threads %u\r\n", settings.num_threads);
+          pos += sprintf(pos, "STAT accepting_conns %u\r\n", stats.accepting_conns);
+          pos += sprintf(pos, "STAT listen_disabled_num %llu\r\n", stats.listen_disabled_num);
++ #ifdef USE_REPLICATION
++         pos += sprintf(pos, "STAT replication MASTER\r\n");
++         pos += sprintf(pos, "STAT repcached_version %s\r\n", REPCACHED_VERSION);
++         pos += sprintf(pos, "STAT repcached_qi_free %u\r\n", settings.rep_qmax - get_qi_count());
++         pos += sprintf(pos, "STAT repcached_wdata %u\r\n", rep_conn ? rep_conn->wbytes + (rep_conn->wcurr - rep_conn->wbuf) : 0);
++         pos += sprintf(pos, "STAT repcached_wsize %u\r\n", rep_conn ? rep_conn->wsize : 0);
++ #endif /*USE_REPLICATION*/
+          pos += sprintf(pos, "END");
+          STATS_UNLOCK();
+          out_string(c, temp);
+***************
+*** 1379,1385 ****
+      set_noreply_maybe(c, tokens, ntokens);
+  
+      if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
+-         out_string(c, "CLIENT_ERROR bad command line format");
+          return;
+      }
+  
+--- 1435,1441 ----
+      set_noreply_maybe(c, tokens, ntokens);
+  
+      if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
++         out_string(c, "CLIENT_ERROR bad command line format!");
+          return;
+      }
+  
+***************
+*** 1390,1398 ****
+      exptime = strtol(tokens[3].value, NULL, 10);
+      vlen = strtol(tokens[4].value, NULL, 10);
+  
+      // does cas value exist?
+-     if(handle_cas)
+-     {
+        req_cas_id = strtoull(tokens[5].value, NULL, 10);
+      }
+  
+--- 1446,1458 ----
+      exptime = strtol(tokens[3].value, NULL, 10);
+      vlen = strtol(tokens[4].value, NULL, 10);
+  
++     if(errno == ERANGE || ((flags == 0 || exptime == 0) && errno == EINVAL)) {
++         out_string(c, "CLIENT_ERROR bad command line format!!");
++         return;
++     }
++ 
+      // does cas value exist?
++     if(handle_cas) {
+        req_cas_id = strtoull(tokens[5].value, NULL, 10);
+      }
+  
+***************
+*** 1451,1457 ****
+      set_noreply_maybe(c, tokens, ntokens);
+  
+      if(tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
+-         out_string(c, "CLIENT_ERROR bad command line format");
+          return;
+      }
+  
+--- 1511,1517 ----
+      set_noreply_maybe(c, tokens, ntokens);
+  
+      if(tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
++         out_string(c, "CLIENT_ERROR bad command line format!!!");
+          return;
+      }
+  
+***************
+*** 1461,1467 ****
+      delta = strtoll(tokens[2].value, NULL, 10);
+  
+      if(errno == ERANGE) {
+-         out_string(c, "CLIENT_ERROR bad command line format");
+          return;
+      }
+  
+--- 1521,1527 ----
+      delta = strtoll(tokens[2].value, NULL, 10);
+  
+      if(errno == ERANGE) {
++         out_string(c, "CLIENT_ERROR bad command line format!!!!");
+          return;
+      }
+  
+***************
+*** 1472,1477 ****
+      }
+  
+      out_string(c, add_delta(c, it, incr, delta, temp));
+      item_remove(it);         /* release our reference */
+  }
+  
+--- 1532,1542 ----
+      }
+  
+      out_string(c, add_delta(c, it, incr, delta, temp));
++ #ifdef USE_REPLICATION
++     if( c != rep_conn){
++         replication_call_rep(ITEM_key(it), it->nkey);
++     }
++ #endif /* USE_REPLICATION */
+      item_remove(it);         /* release our reference */
+  }
+  
+***************
+*** 1546,1552 ****
+      nkey = tokens[KEY_TOKEN].length;
+  
+      if(nkey > KEY_MAX_LENGTH) {
+-         out_string(c, "CLIENT_ERROR bad command line format");
+          return;
+      }
+  
+--- 1611,1617 ----
+      nkey = tokens[KEY_TOKEN].length;
+  
+      if(nkey > KEY_MAX_LENGTH) {
++         out_string(c, "CLIENT_ERROR bad command line format!!!!!");
+          return;
+      }
+  
+***************
+*** 1554,1560 ****
+          exptime = strtol(tokens[2].value, NULL, 10);
+  
+          if(errno == ERANGE) {
+-             out_string(c, "CLIENT_ERROR bad command line format");
+              return;
+          }
+      }
+--- 1619,1625 ----
+          exptime = strtol(tokens[2].value, NULL, 10);
+  
+          if(errno == ERANGE) {
++             out_string(c, "CLIENT_ERROR bad command line format!!!!!!");
+              return;
+          }
+      }
+***************
+*** 1569,1577 ****
+          if (exptime == 0) {
+              item_unlink(it);
+              item_remove(it);      /* release our reference */
+              out_string(c, "DELETED");
+          } else {
+              /* our reference will be transfered to the delete queue */
+              out_string(c, defer_delete(it, exptime));
+          }
+      } else {
+--- 1634,1650 ----
+          if (exptime == 0) {
+              item_unlink(it);
+              item_remove(it);      /* release our reference */
++ #ifdef USE_REPLICATION
++             if( c != rep_conn )
++                 replication_call_del(key, nkey);
++ #endif /* USE_REPLICATION */
+              out_string(c, "DELETED");
+          } else {
+              /* our reference will be transfered to the delete queue */
++ #ifdef USE_REPLICATION
++             if( c != rep_conn )
++                 replication_call_defer_del(key, nkey, realtime(exptime) + stats.started);
++ #endif /* USE_REPLICATION */
+              out_string(c, defer_delete(it, exptime));
+          }
+      } else {
+***************
+*** 1668,1673 ****
+  
+          process_update_command(c, tokens, ntokens, comm, true);
+  
+      } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
+  
+          process_arithmetic_command(c, tokens, ntokens, 1);
+--- 1741,1761 ----
+  
+          process_update_command(c, tokens, ntokens, comm, true);
+  
++ #ifdef USE_REPLICATION
++     } else if ((ntokens == 7) && (strcmp(tokens[COMMAND_TOKEN].value, "rep") == 0 && (comm = NREAD_SET)) && (c == rep_conn)) {
++ 
++         process_update_command(c, tokens, ntokens, comm, true);
++         if(c->item)
++             ((item *)(c->item))->it_flags |= ITEM_REPDATA;
++ 
++     } else if ((ntokens == 2) && (strcmp(tokens[COMMAND_TOKEN].value, "marugoto_end") == 0) && (c == rep_conn)) {
++         if(replication_start() == -1)
++             exit(EXIT_FAILURE);
++         if (settings.verbose > 0)
++             fprintf(stderr,"replication: start\n");
++         return;
++ 
++ #endif /* USE_REPLICATION */
+      } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
+  
+          process_arithmetic_command(c, tokens, ntokens, 1);
+***************
+*** 1699,1704 ****
+          STATS_UNLOCK();
+  
+          if(ntokens == (c->noreply ? 3 : 2)) {
+              settings.oldest_live = current_time - 1;
+              item_flush_expired();
+              out_string(c, "OK");
+--- 1787,1796 ----
+          STATS_UNLOCK();
+  
+          if(ntokens == (c->noreply ? 3 : 2)) {
++ #ifdef USE_REPLICATION
++             if( c != rep_conn )
++                 replication_call_flush_all();
++ #endif
+              settings.oldest_live = current_time - 1;
+              item_flush_expired();
+              out_string(c, "OK");
+***************
+*** 1707,1716 ****
+  
+          exptime = strtol(tokens[1].value, NULL, 10);
+          if(errno == ERANGE) {
+-             out_string(c, "CLIENT_ERROR bad command line format");
+              return;
+          }
+  
+          /*
+            If exptime is zero realtime() would return zero too, and
+            realtime(exptime) - 1 would overflow to the max unsigned
+--- 1799,1813 ----
+  
+          exptime = strtol(tokens[1].value, NULL, 10);
+          if(errno == ERANGE) {
++             out_string(c, "CLIENT_ERROR bad command line format!!!!!!!!");
+              return;
+          }
+  
++ #ifdef USE_REPLICATION
++         if( c != rep_conn )
++             replication_call_defer_flush_all(realtime(exptime) + stats.started);
++ #endif
++         settings.oldest_live = realtime(exptime) - 1;
+          /*
+            If exptime is zero realtime() would return zero too, and
+            realtime(exptime) - 1 would overflow to the max unsigned
+***************
+*** 2038,2043 ****
+  
+      assert(c != NULL);
+  
+      while (!stop) {
+  
+          switch(c->state) {
+--- 2135,2147 ----
+  
+      assert(c != NULL);
+  
++ #ifdef USE_REPLICATION
++     if(rep_exit && (c->state != conn_pipe_recv)){
++         replication_send(rep_conn);
++         return;
++     }
++ #endif /* USE_REPLICATION */
++ 
+      while (!stop) {
+  
+          switch(c->state) {
+***************
+*** 2244,2256 ****
+          case conn_closing:
+              if (c->udp)
+                  conn_cleanup(c);
+              else
+                  conn_close(c);
+              stop = true;
+              break;
+          }
+      }
+  
+      return;
+  }
+  
+--- 2348,2424 ----
+          case conn_closing:
+              if (c->udp)
+                  conn_cleanup(c);
++ #ifdef USE_REPLICATION
++             else if(c == rep_conn)
++                 replication_close();
++ #endif /*USE_REPLICATION*/
+              else
+                  conn_close(c);
+              stop = true;
+              break;
++ 
++ #ifdef USE_REPLICATION
++         case conn_pipe_recv:
++             if(replication_pop() == -1){
++                 replication_close();
++             }
++             stop = true;
++             break;
++ 
++         case conn_rep_listen:
++             if (settings.verbose > 0)
++                 fprintf(stderr,"replication: accept\n");
++             addrlen = sizeof(addr);
++             res = accept(c->sfd, (struct sockaddr *)&addr, &addrlen);
++             if(res == -1){
++                 if(errno == EAGAIN || errno == EWOULDBLOCK) {
++                 } else if (errno == EMFILE) {
++                     fprintf(stderr, "replication: Too many opened connections\n");
++                 } else {
++                     fprintf(stderr, "replication: accept error\n");
++                 }
++             }else{
++                 if(rep_conn){
++                     close(res);
++                     fprintf(stderr,"replication: already connected\n");
++                 }else{
++                     if((flags = fcntl(res, F_GETFL, 0)) < 0 || fcntl(res, F_SETFL, flags | O_NONBLOCK) < 0){
++                         close(res);
++                         fprintf(stderr, "replication: Can't Setting O_NONBLOCK: %s\n", strerror(errno));
++                     }else{
++                         server_close_replication();
++                         rep_conn = dispatch_conn_new(res, conn_read, EV_READ | EV_PERSIST, DATA_BUFFER_SIZE, false);
++                         rep_conn->item   = NULL;
++                         rep_conn->rbytes = 0;
++                         rep_conn->rcurr  = rep_conn->rbuf;
++                         replication_connect();
++                         replication_marugoto(1);
++                         replication_marugoto(0);
++                     }
++                 }
++             }
++             stop = true;
++             break;
++ 
++         case conn_repconnect:
++             rep_conn = c;
++             replication_connect();
++             conn_set_state(c, conn_read);
++             if (settings.verbose > 0)
++                 fprintf(stderr,"replication: marugoto copying\n");
++             if(!update_event(c, EV_READ | EV_PERSIST)){
++                 fprintf(stderr, "replication: Couldn't update event\n");
++                 conn_set_state(c, conn_closing);
++             }
++             stop = true;
++             break;
++ #endif /* USE_REPLICATION */
+          }
+      }
+  
++ #ifdef USE_REPLICATION
++     replication_send(rep_conn);
++ #endif /* USE_REPLICATION */
+      return;
+  }
+  
+***************
+*** 2524,2529 ****
+      return 0;
+  }
+  
+  /*
+   * We keep the current time of day in a global variable that's updated by a
+   * timer event. This saves us a bunch of time() system calls (we really only
+--- 2692,2806 ----
+      return 0;
+  }
+  
++ #ifdef USE_REPLICATION
++ static int get_listen_port_replication(char *optarg)
++ {
++     int   r;
++     char *p;
++     char buff[256];
++     strcpy(buff, optarg);
++     p = strtok(buff, ":");
++     r = atoi(p);
++     return(r);
++ }
++ 
++ static int get_connect_port_replication(char *optarg)
++ {
++     int   r;
++     char *p;
++     char buff[256];
++     strcpy(buff, optarg);
++     p = strtok(buff, ":");
++     r = atoi(p);
++     if((p = strtok(NULL, ":")))
++         r = atoi(p);
++     return(r);
++ }
++ 
++ static int server_socket_replication(const int port) {
++     int sfd;
++     struct linger ling = {0, 0};
++     struct addrinfo *ai;
++     struct addrinfo *next;
++     struct addrinfo hints;
++     char port_buf[NI_MAXSERV];
++     int error;
++     int success = 0;
++ 
++     int flags =1;
++ 
++     memset(&hints, 0, sizeof (hints));
++     hints.ai_flags = AI_PASSIVE|AI_ADDRCONFIG;
++     hints.ai_family = AF_UNSPEC;
++     hints.ai_protocol = IPPROTO_TCP;
++     hints.ai_socktype = SOCK_STREAM;
++     snprintf(port_buf, NI_MAXSERV, "%d", port);
++     error = getaddrinfo(settings.inter, port_buf, &hints, &ai);
++     if (error != 0) {
++       if (error != EAI_SYSTEM)
++         fprintf(stderr, "getaddrinfo(): %s\n", gai_strerror(error));
++       else
++         perror("getaddrinfo()");
++ 
++       return 1;
++     }
++ 
++     for (next= ai; next; next= next->ai_next) {
++         conn *rep_serv_add;
++         if ((sfd = new_socket(next)) == -1) {
++             fprintf(stderr, "replication: new_socket error: %s\n", strerror(errno));
++             freeaddrinfo(ai);
++             return 1;
++         }
++         setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (void *)&flags, sizeof(flags));
++         setsockopt(sfd, SOL_SOCKET, SO_KEEPALIVE, (void *)&flags, sizeof(flags));
++         setsockopt(sfd, SOL_SOCKET, SO_LINGER,    (void *)&ling,  sizeof(ling));
++         setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, (void *)&flags, sizeof(flags));
++ 
++         if (bind(sfd, next->ai_addr, next->ai_addrlen) == -1) {
++             if (errno != EADDRINUSE) {
++                 perror("bind()");
++                 close(sfd);
++                 freeaddrinfo(ai);
++                 return 1;
++             }
++             close(sfd);
++             continue;
++         } else {
++             success++;
++             if (listen(sfd, 1024) == -1) {
++                 perror("listen()");
++                 close(sfd);
++                 freeaddrinfo(ai);
++                 return 1;
++             }
++         }
++ 
++         if (!(rep_serv_add = conn_new(sfd, conn_rep_listen,
++                                        EV_READ | EV_PERSIST, 1, false, main_base))) {
++             fprintf(stderr, "failed to create replication server connection\n");
++             exit(EXIT_FAILURE);
++         }
++ 
++         rep_serv_add->next = rep_serv;
++         rep_serv = rep_serv_add;
++     }
++ 
++     freeaddrinfo(ai);
++ 
++     /* Return zero iff we detected no errors in starting up connections */
++     return success == 0;
++ }
++ 
++ static void server_close_replication() {
++   conn *next = rep_serv;
++   while(rep_serv){
++       conn_close(rep_serv);
++       rep_serv = rep_serv->next;
++   }
++ }
++ #endif /* USE_REPLICATION */
++ 
+  /*
+   * We keep the current time of day in a global variable that's updated by a
+   * timer event. This saves us a bunch of time() system calls (we really only
+***************
+*** 2602,2607 ****
+  
+  static void usage(void) {
+      printf(PACKAGE " " VERSION "\n");
+      printf("-p <num>      TCP port number to listen on (default: 11211)\n"
+             "-U <num>      UDP port number to listen on (default: 11211, 0 is off)\n"
+             "-s <file>     unix socket path to listen on (disables network support)\n"
+--- 2879,2887 ----
+  
+  static void usage(void) {
+      printf(PACKAGE " " VERSION "\n");
++ #ifdef USE_REPLICATION
++     printf("repcached %s\n",REPCACHED_VERSION);
++ #endif /* USE_REPLICATION */
+      printf("-p <num>      TCP port number to listen on (default: 11211)\n"
+             "-U <num>      UDP port number to listen on (default: 11211, 0 is off)\n"
+             "-s <file>     unix socket path to listen on (disables network support)\n"
+***************
+*** 2643,2648 ****
+             "              limits the number of requests process for a given con nection\n"
+             "              to prevent starvation.  default 20\n");
+      printf("-b            Set the backlog queue limit (default 1024)\n");
+      return;
+  }
+  
+--- 2923,2932 ----
+             "              limits the number of requests process for a given con nection\n"
+             "              to prevent starvation.  default 20\n");
+      printf("-b            Set the backlog queue limit (default 1024)\n");
++ #ifdef USE_REPLICATION
++     printf("-x <ip_addr>  hostname or IP address of peer repcached\n");
++     printf("-X <num:num>  TCP port number for replication. <listen:connect> (default: 11212)\n");
++ #endif /* USE_REPLICATION */
+      return;
+  }
+  
+***************
+*** 2744,2755 ****
+  
+  }
+  
+- 
+  static void sig_handler(const int sig) {
+      printf("SIGINT handled.\n");
+      exit(EXIT_SUCCESS);
+  }
+  
+  #if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
+  /*
+   * On systems that supports multiple page sizes we may reduce the
+--- 3028,3055 ----
+  
+  }
+  
+  static void sig_handler(const int sig) {
+      printf("SIGINT handled.\n");
+      exit(EXIT_SUCCESS);
+  }
+  
++ #ifdef USE_REPLICATION
++ static void sig_handler_cb(int fd, short event, void *arg)
++ {
++     struct event *signal = arg;
++     if(settings.verbose){
++         fprintf(stderr, "got signal %d\n", EVENT_SIGNAL(signal));
++     }
++     if(rep_send && rep_conn){
++         if(replication_exit()){
++             exit(EXIT_FAILURE);
++         }
++     }else{
++         exit(EXIT_SUCCESS);
++     }
++ }
++ #endif /* USE_REPLICATION */
++ 
+  #if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
+  /*
+   * On systems that supports multiple page sizes we may reduce the
+***************
+*** 2803,2808 ****
+      struct passwd *pw;
+      struct sigaction sa;
+      struct rlimit rlim;
+      /* listening socket */
+      static int *l_socket = NULL;
+  
+--- 3103,3113 ----
+      struct passwd *pw;
+      struct sigaction sa;
+      struct rlimit rlim;
++ #ifdef USE_REPLICATION
++     struct in_addr   addr;
++     struct addrinfo  master_hint;
++     struct addrinfo *master_addr;
++ #endif /* USE_REPLICATION */
+      /* listening socket */
+      static int *l_socket = NULL;
+  
+***************
+*** 2810,2817 ****
+      static int *u_socket = NULL;
+      static int u_socket_count = 0;
+  
+      /* handle SIGINT */
+      signal(SIGINT, sig_handler);
+  
+      /* init settings */
+      settings_init();
+--- 3115,3124 ----
+      static int *u_socket = NULL;
+      static int u_socket_count = 0;
+  
++ #ifndef USE_REPLICATION
+      /* handle SIGINT */
+      signal(SIGINT, sig_handler);
++ #endif /* USE_REPLICATION */
+  
+      /* init settings */
+      settings_init();
+***************
+*** 2820,2826 ****
+      setbuf(stderr, NULL);
+  
+      /* process arguments */
+      while ((c = getopt(argc, argv, "a:p:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:LR:b:")) != -1) {
+          switch (c) {
+          case 'a':
+              /* access for unix domain socket, as octal mask (like chmod)*/
+--- 3127,3137 ----
+      setbuf(stderr, NULL);
+  
+      /* process arguments */
++ #ifdef USE_REPLICATION
++     while ((c = getopt(argc, argv, "a:p:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:LR:b:X:x:q:")) != -1) {
++ #else
+      while ((c = getopt(argc, argv, "a:p:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:LR:b:")) != -1) {
++ #endif /* USE_REPLICATION */
+          switch (c) {
+          case 'a':
+              /* access for unix domain socket, as octal mask (like chmod)*/
+***************
+*** 2908,2913 ****
+              settings.prefix_delimiter = optarg[0];
+              settings.detail_enabled = 1;
+              break;
+  #if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
+          case 'L' :
+              if (enable_large_pages() == 0) {
+--- 3219,3250 ----
+              settings.prefix_delimiter = optarg[0];
+              settings.detail_enabled = 1;
+              break;
++ #ifdef USE_REPLICATION
++         case 'x':
++             if (inet_pton(AF_INET, optarg, &addr) <= 0) {
++                 memset(&master_hint, 0, sizeof(master_hint));
++                 master_hint.ai_flags    = 0;
++                 master_hint.ai_socktype = 0;
++                 master_hint.ai_protocol = 0;
++                 if(!getaddrinfo(optarg, NULL, &master_hint, &master_addr)){
++                     settings.rep_addr = ((struct sockaddr_in *)(master_addr->ai_addr)) -> sin_addr;
++                     freeaddrinfo(master_addr);
++                 }else{
++                     fprintf(stderr, "Illegal address: %s\n", optarg);
++                     return 1;
++                 }
++             } else {
++                 settings.rep_addr = addr;
++             }
++             break;
++         case 'X':
++             settings.rep_listen_port  = get_listen_port_replication(optarg);
++             settings.rep_connect_port = get_connect_port_replication(optarg);
++             break;
++         case 'q':
++             settings.rep_qmax = atoi(optarg);
++             break;
++ #endif /* USE_REPLICATION */
+  #if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
+          case 'L' :
+              if (enable_large_pages() == 0) {
+***************
+*** 3013,3018 ****
+      /* initialize main thread libevent instance */
+      main_base = event_init();
+  
+      /* initialize other stuff */
+      item_init();
+      stats_init();
+--- 3350,3364 ----
+      /* initialize main thread libevent instance */
+      main_base = event_init();
+  
++ #ifdef USE_REPLICATION
++     /* register events for SIGINT and SIGTERM to handle them in main thread */
++     struct event signal_int, signal_term;
++     event_set(&signal_int,  SIGINT,  EV_SIGNAL|EV_PERSIST, sig_handler_cb, &signal_int);
++     event_add(&signal_int,  NULL);
++     event_set(&signal_term, SIGTERM, EV_SIGNAL|EV_PERSIST, sig_handler_cb, &signal_term);
++     event_add(&signal_term, NULL);
++ #endif
++ 
+      /* initialize other stuff */
+      item_init();
+      stats_init();
+***************
+*** 3033,3038 ****
+          perror("failed to ignore SIGPIPE; sigaction");
+          exit(EXIT_FAILURE);
+      }
+      /* start up worker threads if MT mode */
+      thread_init(settings.num_threads, main_base);
+      /* save the PID in if we're a daemon, do this after thread_init due to
+--- 3379,3385 ----
+          perror("failed to ignore SIGPIPE; sigaction");
+          exit(EXIT_FAILURE);
+      }
++ 
+      /* start up worker threads if MT mode */
+      thread_init(settings.num_threads, main_base);
+      /* save the PID in if we're a daemon, do this after thread_init due to
+***************
+*** 3050,3055 ****
+      }
+      delete_handler(0, 0, 0); /* sets up the event */
+  
+      /* create unix mode sockets after dropping privileges */
+      if (settings.socketpath != NULL) {
+          errno = 0;
+--- 3397,3408 ----
+      }
+      delete_handler(0, 0, 0); /* sets up the event */
+  
++ #ifdef USE_REPLICATION
++     if(replication_init() == -1){
++         fprintf(stderr, "faild to replication init\n");
++         exit(EXIT_FAILURE);
++     }
++ #else
+      /* create unix mode sockets after dropping privileges */
+      if (settings.socketpath != NULL) {
+          errno = 0;
+***************
+*** 3086,3091 ****
+              exit(EXIT_FAILURE);
+          }
+      }
+  
+      /* enter the event loop */
+      event_base_loop(main_base, 0);
+--- 3439,3445 ----
+              exit(EXIT_FAILURE);
+          }
+      }
++ #endif /* USE_REPLICATION */
+  
+      /* enter the event loop */
+      event_base_loop(main_base, 0);
+***************
+*** 3102,3104 ****
+  
+      return 0;
+  }
+--- 3456,3877 ----
+  
+      return 0;
+  }
++ 
++ #ifdef USE_REPLICATION
++ static int replication_start()
++ {
++     static int start = 0;
++     if(start)
++         return(0);
++     if (settings.socketpath != NULL) {
++         if (server_socket_unix(settings.socketpath,settings.access)) {
++             fprintf(stderr, "failed to listen\n");
++             return(-1);
++         }
++     }
++     if (settings.socketpath == NULL) {
++         int udp_port;
++         if (server_socket(settings.port, 0)) {
++             fprintf(stderr, "failed to listen\n");
++             return(-1);
++         }
++         udp_port = settings.udpport ? settings.udpport : settings.port;
++         if (server_socket(udp_port, 1)) {
++             fprintf(stderr, "failed to listen on UDP port %d\n", settings.udpport);
++             return(-1);
++         }
++     }
++     start = 1;
++     return(0);
++ }
++ 
++ static int replication_server_init()
++ {
++     rep_recv = NULL;
++     rep_send = NULL;
++     rep_conn = NULL;
++     if(server_socket_replication(settings.rep_listen_port)){
++         fprintf(stderr, "replication: failed to initialize replication server socket\n");
++         return(-1);
++     }
++     if (settings.verbose > 0)
++         fprintf(stderr, "replication: listen\n");
++     return(replication_start());
++ }
++ 
++ static int replication_client_init()
++ {
++     int s;
++     conn *c;
++     struct addrinfo    ai;
++     struct sockaddr_in server;
++ 
++     rep_recv  = NULL;
++     rep_send  = NULL;
++     rep_conn  = NULL;
++ 
++     memset(&ai,0,sizeof(ai));
++     ai.ai_family   = AF_INET;
++     ai.ai_socktype = SOCK_STREAM;
++     s = new_socket(&ai);
++ 
++     if(s == -1) {
++         fprintf(stderr, "replication: failed to replication client socket\n");
++         return(-1);
++     }else{
++         /* connect */
++         memset((char *)&server, 0, sizeof(server));
++         server.sin_family = AF_INET;
++         server.sin_addr   = settings.rep_addr;
++         server.sin_port   = htons(settings.rep_connect_port);
++         if (settings.verbose > 0)
++             fprintf(stderr,"replication: connect (peer=%s:%d)\n", inet_ntoa(settings.rep_addr), settings.rep_connect_port);
++         if(connect(s,(struct sockaddr *)&server, sizeof(server)) == 0){
++             c = conn_new(s, conn_repconnect, EV_WRITE | EV_PERSIST, DATA_BUFFER_SIZE, false, main_base);
++             if(c == NULL){
++                 fprintf(stderr, "replication: failed to create client conn");
++                 close(s);
++                 return(-1);
++             }
++             drive_machine(c);
++         }else{
++             if(errno == EINPROGRESS){
++                 c = conn_new(s, conn_repconnect, EV_WRITE | EV_PERSIST, DATA_BUFFER_SIZE, false, main_base);
++                 if(c == NULL){
++                     fprintf(stderr, "replication: failed to create client conn");
++                     close(s);
++                     return(-1);
++                 }
++             }else{
++                 fprintf(stdout,"replication: can't connect %s:%d\n", inet_ntoa(server.sin_addr), ntohs(server.sin_port));
++                 close(s);
++                 return(-1);
++             }
++         }
++     }
++     return(0);
++ }
++ 
++ static int replication_init()
++ {
++     if(settings.rep_addr.s_addr != htonl(INADDR_ANY)){
++         if(replication_client_init() != -1){
++             return(0);
++         }
++     }
++     return(replication_server_init());
++ }
++ 
++ static int replication_connect()
++ {
++     int f;
++     int p[2];
++ 
++     if(pipe(p) == -1){
++         fprintf(stderr, "replication: can't create pipe\n");
++         return(-1);
++     }else{
++         if((f = fcntl(p[0], F_GETFL, 0)) < 0 || fcntl(p[0], F_SETFL, f | O_NONBLOCK) < 0) {
++             fprintf(stderr, "replication: can't setting O_NONBLOCK pipe[0]\n");
++             return(-1);
++         }
++         if((f = fcntl(p[1], F_GETFL, 0)) < 0 || fcntl(p[1], F_SETFL, f | O_NONBLOCK) < 0) {
++             fprintf(stderr, "replication: can't setting O_NONBLOCK pipe[0]\n");
++             return(-1);
++         }
++         rep_recv = conn_new(p[0], conn_pipe_recv, EV_READ | EV_PERSIST, DATA_BUFFER_SIZE, false, main_base);
++         rep_send = conn_new(p[1], conn_pipe_send, EV_READ | EV_PERSIST, DATA_BUFFER_SIZE, false, main_base);
++         event_del(&rep_send->event);
++     }
++     return(0);
++ }
++ 
++ static int replication_close()
++ {
++     int     c;
++     int     r;
++     Q_ITEM *q;
++ 
++     if(settings.verbose > 0)
++         fprintf(stderr,"replication: close\n");
++     if(rep_recv){
++         rep_recv->rbytes = sizeof(q);
++         rep_recv->rcurr  = rep_recv->rbuf;
++         c = 0;
++         do{
++             r = read(rep_recv->sfd, rep_recv->rcurr, rep_recv->rbytes);
++             if(r == -1){
++                 break;
++             }
++             rep_recv->rbytes -= r;
++             rep_recv->rcurr  += r;
++             if(!rep_recv->rbytes){
++                 memcpy(&q, rep_recv->rbuf, sizeof(q));
++                 rep_recv->rbytes = sizeof(q);
++                 rep_recv->rcurr  = rep_recv->rbuf;
++                 qi_free(q);
++                 c++;
++             }
++         }while(r);
++         conn_close(rep_recv);
++         rep_recv = NULL;
++         if (settings.verbose > 1) {
++             fprintf(stderr, "replication: qitem free %d items\n", qi_free_list());
++             fprintf(stderr, "replication: close recv %d items\n", c);
++         }
++     }
++     if(rep_send){
++         conn_close(rep_send);
++         rep_send = NULL;
++         if (settings.verbose > 1)
++             fprintf(stderr,"replication: close send\n");
++     }
++     if(rep_conn){
++         rep_conn->wsize  = DATA_BUFFER_SIZE;
++         rep_conn->wbuf   = realloc(rep_conn->wbuf, rep_conn->wsize);
++         rep_conn->wcurr  = rep_conn->wbuf;
++         rep_conn->wbytes = 0;
++         conn_close(rep_conn);
++         rep_conn = NULL;
++         if (settings.verbose > 1)
++             fprintf(stderr,"replication: close conn\n");
++     }
++     if(!rep_exit)
++         replication_server_init();
++     return(0);
++ }
++ 
++ static int replication_marugoto(int f)
++ {
++     static int   keysend  = 0;
++     static int   keycount = 0;
++     static char *keylist  = NULL;
++     static char *keyptr   = NULL;
++ 
++     if(f){
++         if(keylist){
++             free(keylist);
++             keylist  = NULL;
++             keyptr   = NULL;
++             keycount = 0;
++             keysend  = 0;
++         }
++         keylist = (char *)assoc_key_snap((int *)&keycount);
++         keyptr  = keylist;
++         if (!keyptr){
++             replication_call_marugoto_end();
++         }else{
++         if (settings.verbose > 0)
++             fprintf(stderr,"replication: marugoto start\n");
++         }
++     }else{
++         if(keyptr){
++             while(*keyptr){
++                 item *it = item_get(keyptr, strlen(keyptr));
++                 if(it){
++                     item_remove(it);
++                     if(replication_call_rep(keyptr, strlen(keyptr)) == -1){
++                         return(-1);
++                     }else{
++                         keysend++;
++                         keyptr += strlen(keyptr) + 1;
++                         return(0);
++                     }
++                 }
++                 keyptr += strlen(keyptr) + 1;
++             }
++             if(settings.verbose > 0)
++                 fprintf(stderr,"replication: marugoto %d\n", keysend);
++             replication_call_marugoto_end();
++             if(settings.verbose > 0)
++                 fprintf(stderr,"replication: marugoto owari\n");
++             free(keylist);
++             keylist  = NULL;
++             keyptr   = NULL;
++             keycount = 0;
++             keysend  = 0;
++         }
++     }
++     return(0);
++ }
++ 
++ static int replication_send(conn *c)
++ {
++     int w;
++     if(!c)
++         return(0);
++     while(c->wbytes){
++         w = write(c->sfd, c->wcurr, c->wbytes);
++         if(w == -1){
++             if(errno == EINTR){
++                 continue;
++             }
++             if((errno == EAGAIN) || (errno == EWOULDBLOCK)){
++                 return(c->wbytes);
++             }
++             fprintf(stderr, "replication: send error: %s\n", strerror(errno));
++             replication_close();
++             return(-1);
++         }
++         c->wbytes -= w;
++         c->wcurr  += w;
++     }
++     c->wcurr = c->wbuf;
++     return(0);
++ }
++ 
++ static int replication_pop()
++ {
++     int      r;
++     int      c;
++     int      m;
++     Q_ITEM **q;
++     static int wcount = 3;
++     static int wbytes = 0;
++ 
++     if(!rep_conn || !rep_recv || !rep_send)
++         return(0);
++ 
++     r = read(rep_recv->sfd, rep_recv->rbuf, rep_recv->rsize);
++     if(r == -1){
++         if(errno != EAGAIN && errno != EWOULDBLOCK && errno == EINTR){
++             fprintf(stderr,"replication: pop error: %s\n", strerror(errno));
++             return(-1);
++         }
++     }else{
++         c = r / sizeof(Q_ITEM *);
++         m = r % sizeof(Q_ITEM *);
++         q = (Q_ITEM **)(rep_recv->rbuf);
++         while(c--){
++             if(q[c]){
++                 if(replication_cmd(rep_conn, q[c])){
++                     return(-1);
++                 }else{
++                     qi_free(q[c]);
++                 }
++             }else{
++                 if(!rep_exit){
++                     if (settings.verbose) 
++                       fprintf(stderr,"replication: cleanup start\n");
++                     rep_exit = 1;
++                 }
++             }
++         }
++     }
++     if(rep_exit){
++         if(rep_conn->wbytes){
++             if(wbytes && wbytes <= rep_conn->wbytes){
++                 if(wcount > 0){
++                   wcount--;
++                   sleep(1);
++                 }else{
++                   replication_close();
++                   fprintf(stderr,"replication: cleanup error\n");
++                   exit(EXIT_FAILURE);
++                 }
++             }
++             /* retry */
++             wbytes = rep_conn->wbytes;
++             if(replication_exit()){
++                 replication_close();
++                 fprintf(stderr,"replication: cleanup error\n");
++                 exit(EXIT_FAILURE);
++             }
++         }else{
++             /* finish */
++             replication_close();
++             if (settings.verbose) 
++               fprintf(stderr,"replication: cleanup complete\n");
++             exit(EXIT_SUCCESS);
++         }
++     }
++     replication_marugoto(0);
++     return(0);
++ }
++ 
++ static int replication_push()
++ {
++     int w;
++     int l;
++ 
++     while(rep_send->wbytes){
++         l = rep_send->wcurr - rep_send->wbuf;
++         w = write(rep_send->sfd, rep_send->wcurr, rep_send->wbytes);
++         if(w == -1){
++             if(errno == EAGAIN || errno == EINTR){
++                 fprintf(stderr,"replication: push EAGAIN or EINTR\n");
++                 if(l){
++                     rep_send->wbytes -= l;
++                     memmove(rep_send->wbuf, rep_send->wcurr, rep_send->wbytes);
++                     rep_send->wcurr = rep_send->wbuf;
++                 }
++                 if(replication_pop() == -1){
++                     fprintf(stderr,"replication: push poperror\n");
++                     return(-1);
++                 }
++             }else{
++                 return(-1);
++             }
++         }else{
++             rep_send->wbytes -= w;
++             rep_send->wcurr  += w;
++         }
++     }
++     rep_send->wcurr = rep_send->wbuf;
++     return(0);
++ }
++ 
++ static int replication_exit()
++ {
++     return(replication_item(NULL));
++ }
++ 
++ static int replication_item(Q_ITEM *q)
++ {
++     if(rep_send->wcurr + rep_send->wbytes + sizeof(q) > rep_send->wbuf + rep_send->wsize){
++         fprintf(stderr,"replication: buffer over fllow\n");
++         if(q){
++             qi_free(q);
++         }
++         replication_close();
++         return(-1);
++     }
++     memcpy(rep_send->wcurr + rep_send->wbytes, &q, sizeof(q));
++     rep_send->wbytes += sizeof(q);
++     if(replication_push()){
++         fprintf(stderr, "replication: push error\n");
++         if(q){
++             qi_free(q);
++         }
++         replication_close();
++         return(-1);
++     }
++     return(0);
++ }
++ 
++ int replication(enum CMD_TYPE type, R_CMD *cmd)
++ {
++     Q_ITEM *q;
++ 
++     if(rep_send && rep_conn){
++         if(q = qi_new(type, cmd, false)) {
++             replication_item(q);
++         }else{
++             if(replication_pop() == -1){
++                 fprintf(stderr,"replication: queue limit!\n");
++                 replication_close();
++                 return(-1);
++             }else{
++                 if(q = qi_new(type, cmd, true)) {
++                     replication_item(q);
++                 }else{
++                     fprintf(stderr,"replication: can't create Q_ITEM\n");
++                     replication_close();
++                     return(-1);
++                 }
++             }
++         }
++     }
++     return(0);
++ }
++ #endif /* USE_REPLICATION */

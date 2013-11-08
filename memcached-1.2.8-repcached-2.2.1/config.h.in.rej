@@ -1,0 +1,18 @@
+***************
+*** 84,89 ****
+  /* Define to 1 if you have the ANSI C header files. */
+  #undef STDC_HEADERS
+  
+  /* Define this if you want to use pthreads */
+  #undef USE_THREADS
+  
+--- 84,92 ----
+  /* Define to 1 if you have the ANSI C header files. */
+  #undef STDC_HEADERS
+  
++ /* Define this if you want to use replication */
++ #undef USE_REPLICATION
++ 
+  /* Define this if you want to use pthreads */
+  #undef USE_THREADS
+  
