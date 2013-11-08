@@ -18,12 +18,12 @@
 #   
 # Source function library.   
 
-. /etc/rc.status
+#. /etc/rc.status
     
 start()    
 {   
         echo -n "Starting memcached: "  
-        if [ SERVER_INFO == "slave" ];then
+        if [ $SERVER_INFO == "slave" ];then
         else
 
         fi
